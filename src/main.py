@@ -129,11 +129,12 @@ def run_ai_mode(query: str, songs: list) -> None:
     # Import here so classic mode never requires the anthropic package
     from ai_recommender import AIRecommender
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not os.environ.get("GROQ_API_KEY"):
         print(
-            "ERROR: ANTHROPIC_API_KEY is not set.\n"
-            "Add it to a .env file or export it in your shell:\n"
-            "  export ANTHROPIC_API_KEY=sk-ant-...",
+            "ERROR: GROQ_API_KEY is not set.\n"
+            "Get a free key at https://console.groq.com then:\n"
+            "  1. Copy .env.example to .env\n"
+            "  2. Add your key: GROQ_API_KEY=gsk_...",
             file=sys.stderr,
         )
         sys.exit(1)

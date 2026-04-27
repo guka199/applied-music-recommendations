@@ -1,130 +1,74 @@
 """
 AI-powered recommendation layer for VibeFinder.
 
-Two-stage pipeline:
+Uses Groq's free API (LLaMA 3.3 70B) for two stages:
   1. parse_natural_language — converts a free-text query into a structured profile dict
-  2. ai_rerank — re-orders the weighted-scorer's top-10 candidates using Claude's
+  2. ai_rerank — re-orders the weighted-scorer's top-10 candidates using
      musical reasoning
 
 AIRecommender.recommend() orchestrates both stages and falls back to the pure
-weighted scorer if any Anthropic API call fails.
+weighted scorer if any API call fails.
+
+Get a free Groq API key at: https://console.groq.com
 """
 
 import json
 import os
 from typing import Dict, List, Optional, Tuple
 
-import anthropic
+from groq import Groq, APIError
 
 from logger import setup_logger
-from recommender import load_songs, recommend_songs, DEFAULT_WEIGHTS
+from recommender import recommend_songs
 
 logger = setup_logger("vibefinder.ai")
 
-# ---------------------------------------------------------------------------
-# System prompt — injected with cache_control so it is eligible for prompt
-# caching once the catalog grows past the ~4096-token minimum.
-# ---------------------------------------------------------------------------
+MODEL = "llama-3.3-70b-versatile"
+
 SYSTEM_PROMPT = """\
-You are VibeFinder's specialized music recommendation expert.
+You are VibeFinder's music recommendation expert.
 Your job is to understand how listeners describe their mood, activity, and taste,
-then translate that into the precise audio feature dimensions the system uses:
+then translate that into precise audio feature dimensions.
 
-  genre      — one of: pop, lofi, rock, ambient, jazz, synthwave, indie pop,
-                        hip-hop, classical, country, metal, reggae, r&b, edm, blues
-  mood       — one of: happy, chill, intense, relaxed, moody, focused, confident,
-                        peaceful, nostalgic, aggressive, romantic, euphoric, melancholy
-  energy     — float 0.0–1.0  (0 = very calm, 1 = maximum energy)
-  valence    — float 0.0–1.0  (0 = dark/sad, 1 = bright/joyful)
-  tempo_bpm  — integer 60–200
+Valid genres: pop, lofi, rock, ambient, jazz, synthwave, indie pop,
+              hip-hop, classical, country, metal, reggae, r&b, edm, blues
+Valid moods:  happy, chill, intense, relaxed, moody, focused, confident,
+              peaceful, nostalgic, aggressive, romantic, euphoric, melancholy
+energy     — float 0.0–1.0  (0 = very calm, 1 = maximum energy)
+valence    — float 0.0–1.0  (0 = dark/sad, 1 = bright/joyful)
+tempo_bpm  — integer 60–200
 
-When re-ranking candidates, explain your musical reasoning concisely.
-Always respond with valid JSON matching the schema provided in each request.
+Always respond with valid JSON only — no markdown, no code fences, no extra text.
 """
 
-# JSON schema for parse_natural_language output
-_PROFILE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "genre":     {"type": "string"},
-        "mood":      {"type": "string"},
-        "energy":    {"type": "number"},
-        "valence":   {"type": "number"},
-        "tempo_bpm": {"type": "number"},
-    },
-    "required": ["genre", "mood", "energy", "valence", "tempo_bpm"],
-}
 
-# JSON schema for ai_rerank output
-_RERANK_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ranked_titles": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Song titles in descending order of recommendation strength.",
-        },
-        "confidence_scores": {
-            "type": "object",
-            "description": (
-                "Map of song title → confidence float (0.0–1.0) indicating how well "
-                "each song matches the listener's request. 1.0 = perfect match."
-            ),
-            "additionalProperties": {"type": "number"},
-        },
-        "reasoning": {
-            "type": "string",
-            "description": "One-paragraph explanation of the ranking decision.",
-        },
-    },
-    "required": ["ranked_titles", "confidence_scores", "reasoning"],
-}
-
-
-def parse_natural_language(
-    user_input: str,
-    client: anthropic.Anthropic,
-) -> Dict:
+def parse_natural_language(user_input: str, client: Groq) -> Dict:
     """Convert a free-text listening preference into a structured profile dict.
 
     Returns a dict with keys: genre, mood, energy, valence, tempo_bpm.
-    Raises anthropic.APIError on network/auth failure (caller handles fallback).
+    Raises groq.APIError on network/auth failure (caller handles fallback).
     """
     logger.debug("parse_natural_language called with input: %r", user_input)
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=512,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"Convert this listening preference to a structured profile:\n\n"
-                    f'"{user_input}"\n\n'
-                    "Respond with JSON only, matching the provided schema."
-                ),
-            }
-        ],
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "user_profile",
-                    "schema": _PROFILE_SCHEMA,
-                    "strict": True,
-                },
-            }
-        },
+    prompt = (
+        f'Convert this listening preference into a JSON profile:\n\n"{user_input}"\n\n'
+        "Return ONLY a JSON object with exactly these keys: "
+        "genre, mood, energy (float 0-1), valence (float 0-1), tempo_bpm (int). "
+        "No explanation, no markdown — raw JSON only."
     )
 
-    raw = response.content[0].text
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=256,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response.choices[0].message.content
     profile = json.loads(raw)
     logger.info("Parsed profile: %s", profile)
     return profile
@@ -133,18 +77,17 @@ def parse_natural_language(
 def ai_rerank(
     user_description: str,
     candidates: List[Tuple[Dict, float, str]],
-    client: anthropic.Anthropic,
+    client: Groq,
 ) -> Tuple[List[Tuple[Dict, float, str]], Dict[str, float]]:
-    """Re-rank weighted-scorer candidates using Claude's musical reasoning.
+    """Re-rank weighted-scorer candidates using LLaMA's musical reasoning.
 
-    candidates — list of (song_dict, score, explanation) tuples (up to 10)
-    Returns (reranked_tuples, confidence_scores) where confidence_scores maps
-    song title → float (0.0–1.0, Claude's self-reported match confidence).
-    Any candidates the AI omits are appended at the end as a safety net.
-    Raises anthropic.APIError on failure (caller handles fallback).
+    Returns (reranked_tuples, confidence_scores).
+    Guardrail: any title not in the catalog is silently dropped.
+    Safety net: any candidate the AI omits is appended at the end.
+    Raises groq.APIError on failure (caller handles fallback).
     """
     catalog_snippet = "\n".join(
-        f"- \"{s['title']}\" by {s['artist']} "
+        f'- "{s["title"]}" by {s["artist"]} '
         f"(genre={s['genre']}, mood={s['mood']}, energy={s['energy']:.2f}, "
         f"valence={s['valence']:.2f}, tempo={s['tempo_bpm']} bpm)  [score={score:.2f}]"
         for s, score, _ in candidates
@@ -152,45 +95,31 @@ def ai_rerank(
 
     logger.debug("ai_rerank called with %d candidates", len(candidates))
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=1024,
-        system=[
-            {
-                "type": "text",
-                "text": SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"A listener said: \"{user_description}\"\n\n"
-                    "The weighted scorer pre-selected these candidates:\n"
-                    f"{catalog_snippet}\n\n"
-                    "Re-rank them from best to worst match for this listener. "
-                    "Use your musical expertise — consider how energy, mood, and genre "
-                    "interact with what the listener described. "
-                    "Return ONLY the exact song titles as listed above. "
-                    "For confidence_scores, give each song a value from 0.0 to 1.0 "
-                    "reflecting how well it matches the listener's request."
-                ),
-            }
-        ],
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "rerank_result",
-                    "schema": _RERANK_SCHEMA,
-                    "strict": True,
-                },
-            }
-        },
+    prompt = (
+        f'A listener said: "{user_description}"\n\n'
+        f"Candidate songs:\n{catalog_snippet}\n\n"
+        "Re-rank these songs from best to worst match for this listener. "
+        "Use musical expertise — consider how energy, mood, and genre interact "
+        "with what the listener described. "
+        "Return ONLY a JSON object with exactly these keys:\n"
+        '  "ranked_titles": [list of exact song titles in order],\n'
+        '  "confidence_scores": {title: float 0.0-1.0},\n'
+        '  "reasoning": "one sentence explaining the top pick"\n'
+        "Use ONLY the exact song titles listed above. No markdown, raw JSON only."
     )
 
-    raw = response.content[0].text
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=1024,
+        response_format={"type": "json_object"},
+    )
+
+    raw = response.choices[0].message.content
     result = json.loads(raw)
     confidence_scores: Dict[str, float] = result.get("confidence_scores", {})
     avg_confidence = (
@@ -203,13 +132,12 @@ def ai_rerank(
         avg_confidence,
     )
 
-    # Build a lookup from title → candidate tuple (guardrail: only catalog songs)
     title_map: Dict[str, Tuple[Dict, float, str]] = {
         s["title"]: (s, score, expl) for s, score, expl in candidates
     }
 
     reranked: List[Tuple[Dict, float, str]] = []
-    seen_titles = set()
+    seen_titles: set = set()
     for title in result.get("ranked_titles", []):
         if title in title_map and title not in seen_titles:
             reranked.append(title_map[title])
@@ -217,7 +145,6 @@ def ai_rerank(
         else:
             logger.warning("AI returned unknown or duplicate title %r — skipping", title)
 
-    # Safety net: append any candidates the AI omitted
     for title, tup in title_map.items():
         if title not in seen_titles:
             logger.warning("AI omitted %r — appending at end", title)
@@ -231,7 +158,7 @@ class AIRecommender:
 
     def __init__(self, songs: List[Dict]):
         self.songs = songs
-        self.client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        self.client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
     def recommend(
         self, user_description: str, k: int = 5
@@ -239,29 +166,20 @@ class AIRecommender:
         """Run the full AI pipeline.
 
         Returns (top_k_results, parsed_profile, fallback_used, confidence_scores).
-        confidence_scores maps song title → float (0.0–1.0); empty dict on fallback.
-        On any API or JSON error, falls back to the pure weighted scorer.
-        parsed_profile is None when fallback is used.
+        Falls back to pure weighted scorer on any API or JSON error.
         """
         try:
-            # Stage 1: NL → structured profile
             profile = parse_natural_language(user_description, self.client)
-
-            # Stage 2: weighted scorer → top-10 candidates (using the parsed profile)
             candidates = recommend_songs(profile, self.songs, k=10)
-
-            # Stage 3: AI re-rank (also returns per-song confidence scores)
             reranked, confidence_scores = ai_rerank(user_description, candidates, self.client)
-
             return reranked[:k], profile, False, confidence_scores
 
-        except (anthropic.APIError, json.JSONDecodeError, KeyError) as exc:
+        except (APIError, json.JSONDecodeError, KeyError) as exc:
             logger.warning(
                 "AI pipeline failed (%s: %s) — falling back to weighted scorer",
                 type(exc).__name__,
                 exc,
             )
-            # Fallback: derive a basic profile from keyword heuristics for weighted scorer
             fallback_profile = _keyword_fallback(user_description)
             results = recommend_songs(fallback_profile, self.songs, k=k)
             return results, None, True, {}
@@ -278,14 +196,18 @@ def _keyword_fallback(text: str) -> Dict:
     }
     genre = next((v for k, v in genre_keywords.items() if k in text_lower), "pop")
 
-    energy = 0.8 if any(w in text_lower for w in ("workout", "gym", "energy", "hype", "intense", "pump")) else 0.5
-    if any(w in text_lower for w in ("chill", "relax", "study", "focus", "calm", "sleep")):
+    energy = 0.5
+    if any(w in text_lower for w in ("workout", "gym", "energy", "hype", "intense", "pump")):
+        energy = 0.85
+    elif any(w in text_lower for w in ("chill", "relax", "study", "focus", "calm", "sleep")):
         energy = 0.35
 
     mood = "happy"
-    for kw, m in [("sad", "melancholy"), ("melancholy", "melancholy"), ("chill", "chill"),
-                  ("study", "focused"), ("focus", "focused"), ("intense", "intense"),
-                  ("romantic", "romantic"), ("peaceful", "peaceful")]:
+    for kw, m in [
+        ("sad", "melancholy"), ("melancholy", "melancholy"), ("chill", "chill"),
+        ("study", "focused"), ("focus", "focused"), ("intense", "intense"),
+        ("romantic", "romantic"), ("peaceful", "peaceful"),
+    ]:
         if kw in text_lower:
             mood = m
             break
