@@ -149,7 +149,27 @@ python -m src.main --mode ai --query "melancholy rainy day, slow and acoustic"
 pytest
 ```
 
-All 6 tests run without an API key (Anthropic calls are mocked).
+All 7 tests run without an API key (Groq calls are mocked).
+
+---
+
+## Demo Walkthrough
+
+### Screenshot 1 — Classic Mode (High-Energy Pop Fan + Chill Lofi Studier)
+
+![Classic mode output showing top-5 recommendations for two profiles](assets/screenshot_01_classic_mode.png)
+
+### Screenshot 2 — Edge Cases + Weight Experiment
+
+![Edge case profiles and experimental weight results](assets/screenshot_02_edge_cases.png)
+
+### Screenshot 3 — All 7 Tests Passing
+
+![pytest output showing 7 passed in 0.27s](assets/screenshot_03_tests_passing.png)
+
+### System Architecture Diagram
+
+![VibeFinder AI system architecture diagram](assets/system_diagram.png)
 
 ---
 
