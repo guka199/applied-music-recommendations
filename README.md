@@ -113,28 +113,60 @@ injected at ranking time without touching the score math.
    python -m venv .venv
    source .venv/bin/activate      # Mac or Linux
    .venv\Scripts\activate         # Windows
+   ```
 
 2. Install dependencies
 
-```bash
-pip install -r requirements.txt
-```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-3. Run the app:
+3. Run the app (classic mode — no API key needed):
 
-```bash
-python -m src.main
-```
+   ```bash
+   python -m src.main
+   ```
+
+### AI Mode Setup
+
+AI mode sends your natural-language query to Claude, which parses it into a
+structured profile and then re-ranks the weighted-scorer candidates using
+musical reasoning.
+
+1. Copy `.env.example` to `.env`:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Add your Anthropic API key to `.env`:
+
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+   Get a key at <https://console.anthropic.com>.
+
+3. Run with a natural-language query:
+
+   ```bash
+   python -m src.main --mode ai --query "something chill for late-night studying"
+   python -m src.main --mode ai --query "pump-up gym playlist, maximum energy"
+   python -m src.main --mode ai --query "melancholy rainy day indie vibes"
+   ```
+
+   If the API is unavailable, the system automatically falls back to the weighted
+   scorer and labels the results accordingly.
 
 ### Running Tests
-
-Run the starter tests with:
 
 ```bash
 pytest
 ```
 
-You can add more tests in `tests/test_recommender.py`.
+Tests in `tests/test_recommender.py` cover the core weighted scorer.
+Tests in `tests/test_ai_recommender.py` cover the AI layer with mocked API
+calls — no API key required.
 
 ---
 
