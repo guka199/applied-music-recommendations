@@ -144,7 +144,7 @@ def run_ai_mode(query: str, songs: list) -> None:
     print(f"{'═' * 60}")
 
     rec = AIRecommender(songs)
-    results, profile, fallback_used = rec.recommend(query, k=5)
+    results, profile, fallback_used, confidence_scores = rec.recommend(query, k=5)
 
     if fallback_used:
         print("  [AI unavailable — showing weighted-scorer results]\n")
@@ -153,11 +153,16 @@ def run_ai_mode(query: str, songs: list) -> None:
         print(f"    genre={profile.get('genre')}  mood={profile.get('mood')}  "
               f"energy={profile.get('energy')}  valence={profile.get('valence')}  "
               f"tempo={profile.get('tempo_bpm')} bpm")
+        if confidence_scores:
+            avg_conf = sum(confidence_scores.values()) / len(confidence_scores)
+            print(f"    AI avg confidence across top results: {avg_conf:.2f}")
         print(f"\n  AI-ranked recommendations:")
 
     print(f"\n{BAR}")
     for rank, (song, score, explanation) in enumerate(results, start=1):
-        print(f"  {rank}. {song['title']}  —  {song['artist']}")
+        conf = confidence_scores.get(song["title"])
+        conf_str = f"  [AI confidence: {conf:.2f}]" if conf is not None else ""
+        print(f"  {rank}. {song['title']}  —  {song['artist']}{conf_str}")
         print(f"     Genre: {song['genre']:<14} Mood: {song['mood']:<14} Score: {score:.2f}")
         print(f"     Why: {explanation}")
     print()

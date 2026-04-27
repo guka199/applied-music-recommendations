@@ -64,12 +64,20 @@ _RERANK_SCHEMA = {
             "items": {"type": "string"},
             "description": "Song titles in descending order of recommendation strength.",
         },
+        "confidence_scores": {
+            "type": "object",
+            "description": (
+                "Map of song title → confidence float (0.0–1.0) indicating how well "
+                "each song matches the listener's request. 1.0 = perfect match."
+            ),
+            "additionalProperties": {"type": "number"},
+        },
         "reasoning": {
             "type": "string",
             "description": "One-paragraph explanation of the ranking decision.",
         },
     },
-    "required": ["ranked_titles", "reasoning"],
+    "required": ["ranked_titles", "confidence_scores", "reasoning"],
 }
 
 
@@ -126,11 +134,12 @@ def ai_rerank(
     user_description: str,
     candidates: List[Tuple[Dict, float, str]],
     client: anthropic.Anthropic,
-) -> List[Tuple[Dict, float, str]]:
+) -> Tuple[List[Tuple[Dict, float, str]], Dict[str, float]]:
     """Re-rank weighted-scorer candidates using Claude's musical reasoning.
 
     candidates — list of (song_dict, score, explanation) tuples (up to 10)
-    Returns the same tuples reordered, filtered to only confirmed catalog songs.
+    Returns (reranked_tuples, confidence_scores) where confidence_scores maps
+    song title → float (0.0–1.0, Claude's self-reported match confidence).
     Any candidates the AI omits are appended at the end as a safety net.
     Raises anthropic.APIError on failure (caller handles fallback).
     """
@@ -163,7 +172,9 @@ def ai_rerank(
                     "Re-rank them from best to worst match for this listener. "
                     "Use your musical expertise — consider how energy, mood, and genre "
                     "interact with what the listener described. "
-                    "Return ONLY the exact song titles as listed above."
+                    "Return ONLY the exact song titles as listed above. "
+                    "For confidence_scores, give each song a value from 0.0 to 1.0 "
+                    "reflecting how well it matches the listener's request."
                 ),
             }
         ],
@@ -181,7 +192,16 @@ def ai_rerank(
 
     raw = response.content[0].text
     result = json.loads(raw)
-    logger.info("AI re-rank reasoning: %s", result.get("reasoning", ""))
+    confidence_scores: Dict[str, float] = result.get("confidence_scores", {})
+    avg_confidence = (
+        sum(confidence_scores.values()) / len(confidence_scores)
+        if confidence_scores else 0.0
+    )
+    logger.info(
+        "AI re-rank reasoning: %s | avg_confidence=%.2f",
+        result.get("reasoning", ""),
+        avg_confidence,
+    )
 
     # Build a lookup from title → candidate tuple (guardrail: only catalog songs)
     title_map: Dict[str, Tuple[Dict, float, str]] = {
@@ -203,7 +223,7 @@ def ai_rerank(
             logger.warning("AI omitted %r — appending at end", title)
             reranked.append(tup)
 
-    return reranked
+    return reranked, confidence_scores
 
 
 class AIRecommender:
@@ -215,9 +235,11 @@ class AIRecommender:
 
     def recommend(
         self, user_description: str, k: int = 5
-    ) -> Tuple[List[Tuple[Dict, float, str]], Optional[Dict], bool]:
-        """Run the full AI pipeline and return (top_k_results, parsed_profile, fallback_used).
+    ) -> Tuple[List[Tuple[Dict, float, str]], Optional[Dict], bool, Dict[str, float]]:
+        """Run the full AI pipeline.
 
+        Returns (top_k_results, parsed_profile, fallback_used, confidence_scores).
+        confidence_scores maps song title → float (0.0–1.0); empty dict on fallback.
         On any API or JSON error, falls back to the pure weighted scorer.
         parsed_profile is None when fallback is used.
         """
@@ -228,10 +250,10 @@ class AIRecommender:
             # Stage 2: weighted scorer → top-10 candidates (using the parsed profile)
             candidates = recommend_songs(profile, self.songs, k=10)
 
-            # Stage 3: AI re-rank
-            reranked = ai_rerank(user_description, candidates, self.client)
+            # Stage 3: AI re-rank (also returns per-song confidence scores)
+            reranked, confidence_scores = ai_rerank(user_description, candidates, self.client)
 
-            return reranked[:k], profile, False
+            return reranked[:k], profile, False, confidence_scores
 
         except (anthropic.APIError, json.JSONDecodeError, KeyError) as exc:
             logger.warning(
@@ -242,7 +264,7 @@ class AIRecommender:
             # Fallback: derive a basic profile from keyword heuristics for weighted scorer
             fallback_profile = _keyword_fallback(user_description)
             results = recommend_songs(fallback_profile, self.songs, k=k)
-            return results, None, True
+            return results, None, True, {}
 
 
 def _keyword_fallback(text: str) -> Dict:

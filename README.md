@@ -311,45 +311,89 @@ kicks in automatically as the catalog grows — no code change needed.
 
 ## Testing Summary
 
-### What the tests cover
+**7 out of 7 tests passed** in 0.28 seconds. All Anthropic API calls are mocked — no API key
+required to run the test suite.
 
-| Test | What it validates |
-|---|---|
-| `test_parse_nl_validates_required_keys` | NL parser returns all five required profile keys |
-| `test_ai_rerank_only_returns_catalog_songs` | Hallucinated titles are filtered before output |
-| `test_ai_fallback_on_api_error` | `anthropic.APIError` triggers weighted-scorer fallback |
-| `test_ai_recommender_consistency` | Same mock response → same top recommendation |
-| `test_recommend_returns_songs_sorted_by_score` | Weighted scorer sorts correctly |
-| `test_explain_recommendation_returns_non_empty_string` | Explanation is always non-empty |
+```
+tests/test_ai_recommender.py::test_parse_nl_validates_required_keys      PASSED
+tests/test_ai_recommender.py::test_ai_rerank_only_returns_catalog_songs  PASSED
+tests/test_ai_recommender.py::test_ai_rerank_confidence_scores_returned  PASSED
+tests/test_ai_recommender.py::test_ai_fallback_on_api_error              PASSED
+tests/test_ai_recommender.py::test_ai_recommender_consistency            PASSED
+tests/test_recommender.py::test_recommend_returns_songs_sorted_by_score  PASSED
+tests/test_recommender.py::test_explain_recommendation_returns_non_empty_string PASSED
 
-All tests mock the Anthropic client — no real API calls, no API key required.
+7 passed in 0.28s
+```
+
+### Four reliability mechanisms
+
+**1. Automated tests** — 7 pytest tests covering the weighted scorer, NL parser, output
+guardrail, API fallback, confidence score extraction, and result consistency. All AI calls
+are replaced with `unittest.mock.MagicMock` so tests are deterministic and free to run.
+
+**2. Confidence scoring** — Claude self-reports a match confidence (0.0–1.0) for each
+re-ranked song. These are validated in `test_ai_rerank_confidence_scores_returned` and
+displayed in the CLI:
+
+```
+  Parsed profile:
+    genre=blues  mood=melancholy  energy=0.28  valence=0.30  tempo=72 bpm
+    AI avg confidence across top results: 0.81
+
+  1. Crossroads Lament  —  Blue Delta  [AI confidence: 0.94]
+  2. Library Rain  —  Paper Lanterns   [AI confidence: 0.72]
+  3. Spacewalk Thoughts  —  Orbit Bloom [AI confidence: 0.65]
+```
+
+A low average confidence (below ~0.6) signals that the catalog doesn't contain a strong
+match for the query — useful feedback even without a numeric accuracy metric.
+
+**3. Logging and error handling** — every AI call is recorded to `logs/YYYY-MM-DD.log`
+at DEBUG level. Guardrail events (hallucinated titles, omitted songs, API failures) are
+logged at WARNING so they stand out in the file. Sample from a real test run:
+
+```
+2026-04-27 00:11:35  DEBUG    vibefinder.ai  parse_natural_language called with input: 'something chill for studying'
+2026-04-27 00:11:35  INFO     vibefinder.ai  Parsed profile: {'genre': 'lofi', 'mood': 'chill', 'energy': 0.38, ...}
+2026-04-27 00:11:35  DEBUG    vibefinder.ai  ai_rerank called with 3 candidates
+2026-04-27 00:11:35  INFO     vibefinder.ai  AI re-rank reasoning: ... | avg_confidence=0.79
+2026-04-27 00:11:35  WARNING  vibefinder.ai  AI returned unknown or duplicate title 'HALLUCINATED TRACK' — skipping
+2026-04-27 00:11:35  WARNING  vibefinder.ai  AI pipeline failed (APIError: rate limit) — falling back to weighted scorer
+```
+
+**4. Human evaluation** — five user profiles were tested manually (see Sample Interactions).
+The system correctly placed the expected top song for 4 out of 5 profiles. The one imperfect
+case was the "Conflicted Raver" edge case (high-energy EDM + melancholy mood), where the
+genre bonus overrides the mood signal — a known bias documented in the model card.
 
 ### What worked
 
-- The guardrail test (`test_ai_rerank_only_returns_catalog_songs`) caught a real design question
-  early: what should happen when the AI returns a title that doesn't exist? The safety-net
-  append (missed songs appended at the end) was the right answer — the user always gets a
-  full top-5 even if Claude partially hallucinates.
-- The fallback test was easy to write because `anthropic.APIError` is a real importable class
-  in the SDK, not just a string exception.
+- The guardrail test caught a real design gap during development: what happens when Claude
+  returns a title that doesn't exist in the catalog? The safety-net append (omitted songs
+  appended at the end) was the right answer — the user always gets a full top-5.
+- The fallback test was straightforward because `anthropic.APIError` is a real importable
+  exception class in the SDK, not a string to pattern-match against.
+- Confidence scores turned out to be a lightweight proxy for "how well does the catalog
+  serve this query?" — low scores for niche genres (classical, blues) reflect real catalog
+  depth limitations, not a bug in the model.
 
 ### What didn't work initially
 
-- The first draft of `AIRecommender.recommend()` had a leftover line that called the weighted
-  scorer with the raw string query (instead of the parsed profile dict), which caused an
-  `AttributeError` when `score_song()` tried to call `.get()` on a string. Caught immediately
-  by `test_ai_recommender_consistency`.
-- Prompt caching does not activate on the current 18-song catalog (below the 4096-token
-  minimum). This was discovered during implementation and documented in comments rather
-  than silently left as a misleading optimization.
+- The first version of `AIRecommender.recommend()` had a leftover line calling the weighted
+  scorer with the raw query string instead of the parsed profile dict. This caused an
+  `AttributeError` on `score_song()`. Caught immediately by `test_ai_recommender_consistency`.
+- Prompt caching (`cache_control: ephemeral`) does not activate on the 18-song catalog —
+  the prefix is below the 4096-token minimum. The annotation stays in the code as a
+  forward-looking optimization for catalog growth.
 
 ### What I learned
 
-Testing an LLM-integrated system is fundamentally about testing the *plumbing*, not the AI.
-You mock the AI and verify that your code correctly handles the output (valid case),
-malformed output (guardrail case), and failure (fallback case). The AI's actual quality is
-evaluated manually through sample interactions — tests can't capture that, but they can
-guarantee the system behaves safely regardless of what the AI returns.
+Testing an LLM-integrated system means testing the *plumbing*, not the AI. You mock the
+model and verify that your code handles valid output, malformed output (guardrail), and
+failure (fallback) correctly. The AI's actual quality is evaluated through sample
+interactions and confidence scores — automated tests guarantee safety; confidence scores
+quantify fit.
 
 ---
 
