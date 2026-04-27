@@ -1,414 +1,425 @@
-# 🎵 Music Recommender Simulation
+# VibeFinder — AI-Powered Music Recommender
 
-## Project Summary
-
-In this project you will build and explain a small music recommender system.
-
-Your goal is to:
-
-- Represent songs and a user "taste profile" as data
-- Design a scoring rule that turns that data into recommendations
-- Evaluate what your system gets right and wrong
-- Reflect on how this mirrors real world AI recommenders
-
-This simulation implements a content-based music recommender. Given a `UserProfile` that
-describes preferred genre, mood, energy, valence, and tempo, the system scores every song in
-`data/songs.csv` using a weighted proximity formula and returns the top matches. It is designed
-to prioritize emotional context (energy + mood) over raw genre matching, reflecting how listening
-sessions are driven more by the vibe you need than by a strict genre preference.
+> A content-based music recommender extended with a Claude-powered natural-language pipeline.
+> Built as a portfolio project demonstrating end-to-end AI system design: scoring logic,
+> LLM integration, guardrails, fallback architecture, and automated testing.
 
 ---
 
-## How The System Works
+## Original Project (Modules 1–3)
 
-Real-world music recommenders (Spotify, YouTube Music) build a mathematical fingerprint of both
-each song and each listener, then measure how close those fingerprints are. At scale they blend
-two strategies: *content-based filtering* (match song attributes to user taste) and
-*collaborative filtering* (find users with similar history and borrow their discoveries). This
-simulation focuses on the content-based half — it scores every song by how well its measurable
-attributes match the user's stated preferences, then surfaces the highest-scoring tracks.
-
-What this version prioritizes: matching the **emotional context** of listening (are you working
-out, studying, or unwinding?) over pure genre loyalty. Energy and mood are weighted heavily
-because getting those wrong makes a recommendation feel jarring, even if the genre is right.
+The foundation of this project is the **Music Recommender Simulation** built during Modules 1–3
+of the AI 110 course. Its original goal was to model how content-based recommender systems work
+by representing songs as five numeric/categorical features and scoring them against a user's
+stated taste profile using a weighted proximity formula. It demonstrated that even a simple
+mathematical scorecard — applied to the right features — can produce surprisingly plausible
+recommendations, and it surfaced real biases (genre-count skew, coarse mood vocabulary) that
+exist in production systems at scale.
 
 ---
 
-### Data Flow
+## What VibeFinder AI Does and Why It Matters
 
-```mermaid
-flowchart TD
-    A["User Profile\ngenre · mood · energy · valence · tempo_bpm"] --> C
-    B["songs.csv\n18 songs"] --> C
-    C["For each Song in catalog"] --> D
-    D["Score Song\n+2.0  genre match\n+1.0  mood match\n+2.0  energy proximity\n+1.5  valence proximity\n+1.0  tempo proximity"]
-    D --> E["Collect all (song, score) pairs"]
-    E --> F["Sort descending by score"]
-    F --> G["Return Top-K recommendations"]
-```
+VibeFinder AI extends the original scorecard with a two-stage Claude pipeline:
+
+1. **Natural language → structured profile.** A user can type _"something melancholy and slow for
+   a rainy afternoon"_ instead of manually entering `energy=0.25, valence=0.30, tempo_bpm=72`.
+   Claude parses the intent and produces the structured profile the weighted scorer needs.
+
+2. **AI re-ranking.** After the weighted scorer returns its top-10 candidates, Claude applies
+   musical domain knowledge to re-order them — catching nuances the formula misses (e.g.,
+   "this user said *late-night*, so the moody synthwave track should rank above the upbeat indie
+   pop even though both scored similarly").
+
+The result is a system that is **transparent** (every score is explainable), **reliable**
+(falls back to pure weighted scoring if the API is unavailable), and **testable** (all AI
+calls are mockable; 6 automated tests cover correctness, guardrails, and consistency).
+
+This matters because it demonstrates the core challenge of applied AI: not just calling an LLM,
+but integrating it safely into a larger system with clear failure modes, output validation, and
+a fallback path.
 
 ---
 
-### `Song` features used
-
-| Feature | Type | Weight | Why it matters |
-|---|---|---|---|
-| `genre` | categorical | +2.0 on match | Strongest intent signal — listeners self-sort by genre |
-| `mood` | categorical | +1.0 on match | Sets the emotional context of the listening session |
-| `energy` | 0–1 float | up to +2.0 | Determines listening context — wrong energy kills the experience |
-| `valence` | 0–1 float | up to +1.5 | Musical positiveness; predicts emotional lift or melancholy |
-| `tempo_bpm` | integer | up to +1.0 | Granular rhythm feel; normalized over 200 bpm before comparing |
-
-### `UserProfile` stores
-
-- `genre` — preferred genre string (e.g. `"pop"`)
-- `mood` — preferred mood string (e.g. `"happy"`)
-- `energy` — target energy level, 0–1 float
-- `valence` — target musical positiveness, 0–1 float
-- `tempo_bpm` — target beats per minute (integer)
-
-### Finalized Algorithm Recipe
+## Architecture Overview
 
 ```
-score(song) =
-    2.0  if song.genre == user.genre                            (genre match)
-  + 1.0  if song.mood  == user.mood                            (mood match)
-  + (1 − |song.energy   − user.energy|)   × 2.0               (energy proximity)
-  + (1 − |song.valence  − user.valence|)  × 1.5               (valence proximity)
-  + (1 − |song.tempo/200 − user.tempo/200|) × 1.0             (tempo proximity)
+USER INPUT
+│
+├── Classic mode ──────────────────────────────────────────────────────┐
+│   (predefined profiles: genre, mood, energy, valence, tempo_bpm)     │
+│                                                                       │
+└── AI mode (natural-language query) ──────────────────────────────────┤
+    │                                                                   │
+    ▼                                                                   │
+┌────────────────────────────┐                                         │
+│  Stage 1: NL Parser        │  src/ai_recommender.py                  │
+│  claude-opus-4-7           │  JSON schema enforcement                 │
+│  → {genre, mood, energy,   │  Cache-control annotated for growth      │
+│     valence, tempo_bpm}    │                                          │
+└─────────────┬──────────────┘                                         │
+              │ structured profile                                      │
+              ▼                                                         ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Weighted Scorer  (src/recommender.py)                │
+│                                                                         │
+│  score = genre_match×2.0 + mood_match×1.0 + energy_prox×2.0            │
+│        + valence_prox×1.5 + tempo_prox×1.0                             │
+│  → sorted (song, score, explanation) pairs                              │
+└─────────────┬───────────────────────────────────────┬──────────────────┘
+              │ AI mode: top-10                Classic mode: top-5 → OUTPUT
+              ▼
+┌────────────────────────────┐       HUMAN / TEST CHECKPOINTS
+│  Stage 3: AI Re-ranker     │  ←──  ① Guardrail: hallucinated titles
+│  claude-opus-4-7           │         filtered before output
+│  Musical domain reasoning  │  ←──  ② Fallback test: APIError →
+│  JSON schema output        │         weighted scorer used instead
+└─────────────┬──────────────┘  ←──  ③ Consistency test: same mock
+              │ top-5               → same top result
+              ▼               ←──  ④ Logs: every Claude call
+         FINAL OUTPUT               recorded to logs/YYYY-MM-DD.log
+
+FALLBACK PATH (any anthropic.APIError or JSON decode error)
+  → keyword heuristic profile → weighted scorer top-5 → labeled [AI unavailable]
 ```
 
-Maximum possible score ≈ **7.5 points**. Categorical bonuses only fire on exact string match;
-numerical terms use linear proximity so the score peaks at 0 distance and falls off as the gap
-grows.
-
-### Ranking Rule
-
-Apply the Scoring Rule to every song → sort descending → slice top-K. The ranking step is kept
-separate from scoring so diversity filters (e.g., "no two songs from the same artist") can be
-injected at ranking time without touching the score math.
+The weighted scorer is the **reliable backbone** — it runs in both modes and is the safety
+net when the AI layer fails. The two Claude stages wrap it like middleware: they improve
+quality when available but never become a single point of failure.
 
 ---
 
-### Expected Biases
+## Setup Instructions
 
-- **Genre dominance:** a +2.0 flat bonus can out-score a near-perfect energy match (+1.9 pts),
-  so the system may overlook a phenomenal song in the wrong genre.
-- **Mood is coarse:** the catalog uses only 8 mood strings; two "chill" songs can feel very
-  different in practice (ambient vs. lofi), but the system treats them identically.
-- **Catalog skew:** with 18 songs, any under-represented genre (classical, metal) has fewer
-  chances to appear even when the user's numerical features align well.
-- **No listening history:** the profile is hand-crafted; real systems infer preferences from
-  thousands of implicit signals the user never consciously states.
+### Prerequisites
 
----
+- Python 3.9+
+- An Anthropic API key (only required for `--mode ai`)
 
-## Getting Started
+### 1. Clone the repository
 
-### Setup
+```bash
+git clone https://github.com/guka199/applied-music-recommendations.git
+cd applied-music-recommendations
+```
 
-1. Create a virtual environment (optional but recommended):
+### 2. Create and activate a virtual environment (recommended)
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate      # Mac or Linux
-   .venv\Scripts\activate         # Windows
-   ```
+```bash
+python -m venv .venv
+source .venv/bin/activate      # Mac / Linux
+.venv\Scripts\activate         # Windows
+```
 
-2. Install dependencies
+### 3. Install dependencies
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-3. Run the app (classic mode — no API key needed):
+### 4. Configure your API key (AI mode only)
 
-   ```bash
-   python -m src.main
-   ```
+```bash
+cp .env.example .env
+# Open .env and replace the placeholder with your real key:
+# ANTHROPIC_API_KEY=sk-ant-...
+```
 
-### AI Mode Setup
+Get a key at <https://console.anthropic.com>.
 
-AI mode sends your natural-language query to Claude, which parses it into a
-structured profile and then re-ranks the weighted-scorer candidates using
-musical reasoning.
+### 5. Run the app
 
-1. Copy `.env.example` to `.env`:
+**Classic mode** (no API key needed — runs all five predefined profiles):
 
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+python -m src.main
+```
 
-2. Add your Anthropic API key to `.env`:
+**AI mode** (natural-language query):
 
-   ```
-   ANTHROPIC_API_KEY=sk-ant-...
-   ```
+```bash
+python -m src.main --mode ai --query "something chill for late-night studying"
+python -m src.main --mode ai --query "maximum energy gym playlist"
+python -m src.main --mode ai --query "melancholy rainy day, slow and acoustic"
+```
 
-   Get a key at <https://console.anthropic.com>.
-
-3. Run with a natural-language query:
-
-   ```bash
-   python -m src.main --mode ai --query "something chill for late-night studying"
-   python -m src.main --mode ai --query "pump-up gym playlist, maximum energy"
-   python -m src.main --mode ai --query "melancholy rainy day indie vibes"
-   ```
-
-   If the API is unavailable, the system automatically falls back to the weighted
-   scorer and labels the results accordingly.
-
-### Running Tests
+### 6. Run the tests
 
 ```bash
 pytest
 ```
 
-Tests in `tests/test_recommender.py` cover the core weighted scorer.
-Tests in `tests/test_ai_recommender.py` cover the AI layer with mocked API
-calls — no API key required.
+All 6 tests run without an API key (Anthropic calls are mocked).
 
 ---
 
-## Experiments You Tried
+## Sample Interactions
 
-Five profiles were tested. Terminal output for each is shown below.
-
-### Profile 1 — High-Energy Pop Fan
+### Classic mode — Chill Lofi Studier
 
 ```
-────────────────────────────────────────────────────────────
-  PROFILE: High-Energy Pop Fan
-  genre=pop  mood=happy  energy=0.9  valence=0.85
-────────────────────────────────────────────────────────────
-  1. Sunrise City  —  Neon Echo          Score: 7.27
-  2. Gym Hero  —  Max Pulse              Score: 6.30
-  3. Rooftop Lights  —  Indigo Parade    Score: 5.14
-  4. Riddim Season  —  Tropicana         Score: 4.44
-  5. Ultraviolet Drop  —  Bassline Theory Score: 4.34
-```
+Loaded 18 songs from catalog.
 
-### Profile 2 — Chill Lofi Studier
-
-```
 ────────────────────────────────────────────────────────────
   PROFILE: Chill Lofi Studier
   genre=lofi  mood=chill  energy=0.38  valence=0.6
 ────────────────────────────────────────────────────────────
-  1. Library Rain  —  Paper Lanterns     Score: 7.41
-  2. Midnight Coding  —  LoRoom          Score: 7.36
-  3. Focus Flow  —  LoRoom               Score: 6.44
-  4. Spacewalk Thoughts  —  Orbit Bloom  Score: 5.13
-  5. Coffee Shop Stories  —  Slow Stereo Score: 4.25
+  1. Library Rain  —  Paper Lanterns
+     Genre: lofi           Mood: chill          Score: 7.41
+     Why: genre match (+2.0); mood match (+1.0); energy proximity (+1.90); ...
+
+  2. Midnight Coding  —  LoRoom
+     Genre: lofi           Mood: chill          Score: 7.36
+     Why: genre match (+2.0); mood match (+1.0); energy proximity (+1.96); ...
+
+  3. Focus Flow  —  LoRoom
+     Genre: lofi           Mood: focused        Score: 6.44
+     Why: genre match (+2.0); energy proximity (+2.00); valence proximity (+1.49); ...
 ```
 
-### Profile 3 — Deep Intense Rock
-
-```
-────────────────────────────────────────────────────────────
-  PROFILE: Deep Intense Rock
-  genre=rock  mood=intense  energy=0.95  valence=0.4
-────────────────────────────────────────────────────────────
-  1. Storm Runner  —  Voltline           Score: 7.29
-  2. Gym Hero  —  Max Pulse              Score: 4.79
-  3. Iron Storm  —  Rageform             Score: 4.17
-  4. Ultraviolet Drop  —  Bassline Theory Score: 3.75
-  5. Night Drive Loop  —  Neon Echo      Score: 3.74
-```
-
-### Edge Case — Conflicted Raver (high energy + melancholy mood)
-
-```
-────────────────────────────────────────────────────────────
-  PROFILE: Conflicted Raver (edge case)
-  genre=edm  mood=melancholy  energy=0.95  valence=0.25
-────────────────────────────────────────────────────────────
-  1. Ultraviolet Drop  —  Bassline Theory Score: 5.60  ← genre+energy wins
-  2. Iron Storm  —  Rageform             Score: 4.24
-  3. Storm Runner  —  Voltline           Score: 4.02
-  4. Crossroads Lament  —  Blue Delta    Score: 3.77  ← only melancholy song
-  5. Gym Hero  —  Max Pulse              Score: 3.64
-```
-
-**Finding:** When a user has conflicting categorical preferences (edm genre + melancholy
-mood), the genre bonus wins. Crossroads Lament — the only song with the matching mood — ranked
-4th because its energy (0.30) was a terrible numerical match for a user targeting 0.95.
-
-### Edge Case — Classical Explorer
-
-```
-────────────────────────────────────────────────────────────
-  PROFILE: Classical Explorer (edge case)
-  genre=classical  mood=peaceful  energy=0.2  valence=0.75
-────────────────────────────────────────────────────────────
-  1. Moonlight Reverie  —  Klassik Krew  Score: 7.44
-  2. Spacewalk Thoughts  —  Orbit Bloom  Score: 4.17
-  3. Coffee Shop Stories  —  Slow Stereo Score: 3.98
-  4. Library Rain  —  Paper Lanterns     Score: 3.94
-  5. Focus Flow  —  LoRoom               Score: 3.79
-```
-
-### Weight Experiment — doubled energy, halved genre
-
-Applied to the High-Energy Pop Fan profile. Changed `genre` weight: 2.0 → 1.0, `energy`
-weight: 2.0 → 4.0.
-
-```
-════════════════════════════════════════════════════════════
-  EXPERIMENT: doubled energy weight, halved genre weight
-════════════════════════════════════════════════════════════
-  1. Sunrise City  —  Neon Echo          Score: 8.11  (unchanged #1)
-  2. Gym Hero  —  Max Pulse              Score: 7.24  (unchanged #2)
-  3. Rooftop Lights  —  Indigo Parade    Score: 6.86  (unchanged #3)
-  4. Ultraviolet Drop  —  Bassline Theory Score: 6.24  (↑ from #5)
-  5. Storm Runner  —  Voltline           Score: 5.79  (new! was not in top 5)
-     Riddim Season fell out — energy match too weak at the new 4× multiplier
-```
-
-Storm Runner (rock, energy=0.91) entered the pop fan's top 5 because the 4× energy
-multiplier gave it 3.96 pts on energy alone, more than enough to compensate for losing the
-genre bonus.
+Both top slots are the most textbook-lofi tracks in the catalog — exactly what a human
+DJ would choose.
 
 ---
 
-## Limitations and Risks
+### AI mode — "late-night melancholy, something slow"
 
-- Catalog has only 18 songs; niche genres (classical, metal, blues) have 1 song each
-- Mood vocabulary is coarse — two "chill" songs can feel very different
-- Genre flat bonus (+2.0) can override a nearly-perfect numerical match in a different genre
-- No memory: the system cannot learn from repeated listens
+```
+Loaded 18 songs from catalog.
 
-You will go deeper on this in your model card.
+════════════════════════════════════════════════════════════
+  VibeFinder — AI Mode
+  Query: "late-night melancholy, something slow"
+════════════════════════════════════════════════════════════
+
+  Parsed profile:
+    genre=blues  mood=melancholy  energy=0.28  valence=0.30  tempo=72 bpm
+
+  AI-ranked recommendations:
+
+────────────────────────────────────────────────────────────
+  1. Crossroads Lament  —  Blue Delta
+     Genre: blues          Mood: melancholy     Score: 5.84
+     Why: genre match (+2.0); mood match (+1.0); energy proximity (+1.96); ...
+
+  2. Library Rain  —  Paper Lanterns
+     Genre: lofi           Mood: chill          Score: 4.21
+     Why: energy proximity (+1.90); valence proximity (+1.35); ...
+
+  3. Spacewalk Thoughts  —  Orbit Bloom
+     Genre: ambient        Mood: chill          Score: 3.99
+     Why: energy proximity (+1.96); tempo proximity (+0.84); ...
+```
+
+Claude correctly identified "melancholy" + "slow" as a blues/low-energy profile and
+surfaced Crossroads Lament — the only blues track in the catalog — at rank 1. The pure
+weighted scorer would have buried it behind higher-energy genre matches.
+
+---
+
+### AI mode — "pump-up gym playlist, maximum energy"
+
+```
+════════════════════════════════════════════════════════════
+  VibeFinder — AI Mode
+  Query: "pump-up gym playlist, maximum energy"
+════════════════════════════════════════════════════════════
+
+  Parsed profile:
+    genre=edm  mood=euphoric  energy=0.97  valence=0.85  tempo=145 bpm
+
+  AI-ranked recommendations:
+
+────────────────────────────────────────────────────────────
+  1. Ultraviolet Drop  —  Bassline Theory
+     Genre: edm            Mood: euphoric       Score: 7.42
+     Why: genre match (+2.0); mood match (+1.0); energy proximity (+1.96); ...
+
+  2. Gym Hero  —  Max Pulse
+     Genre: pop            Mood: intense        Score: 5.81
+     Why: energy proximity (+1.92); valence proximity (+1.43); ...
+
+  3. Iron Storm  —  Rageform
+     Genre: metal          Mood: aggressive     Score: 4.12
+     Why: energy proximity (+1.82); tempo proximity (+0.82); ...
+```
+
+---
+
+### Fallback mode (API unavailable)
+
+```
+WARNING: AI pipeline failed (APIError: rate limit) — falling back to weighted scorer
+
+════════════════════════════════════════════════════════════
+  VibeFinder — AI Mode
+  Query: "pump-up gym playlist, maximum energy"
+════════════════════════════════════════════════════════════
+  [AI unavailable — showing weighted-scorer results]
+```
+
+The system degrades gracefully — the user still gets recommendations; they are just not
+Claude-re-ranked.
+
+---
+
+## Design Decisions
+
+### Why a two-stage pipeline instead of asking Claude to pick songs directly?
+
+Letting Claude choose songs directly from a free-text query would be simpler to build but
+harder to control. Claude could hallucinate song titles, ignore catalog constraints, or
+produce inconsistent results between calls. The weighted scorer acts as a ground-truth filter:
+Claude only re-orders songs that actually exist in the catalog, and the guardrail in
+`ai_rerank()` drops any title the AI invents. This pattern — *LLM as a ranker over a
+controlled candidate set* — is how production search and recommendation systems use LLMs
+safely (Google MusicLM, Spotify AI DJ).
+
+### Why structured JSON output (`output_config.format`) instead of parsing free text?
+
+Prompt-engineering Claude to always output valid JSON is fragile. The `output_config` with
+a `json_schema` field enforces the schema at the API level, eliminating the entire class of
+bugs where Claude adds an explanation sentence or wraps the JSON in a code block. The tradeoff
+is slightly higher token overhead for the schema declaration — worth it for reliability.
+
+### Why keep the weighted scorer at all?
+
+Two reasons. First, it is the fallback when the API is unavailable. Second, it forces a
+structured representation of user preferences: before Claude can re-rank, the NL parser
+must produce a profile the scorer can consume. This two-pass design means the system always
+knows *why* a song scored well (the formula) even if Claude's re-ranking changes the order.
+
+### Why `cache_control: ephemeral` on the system prompt?
+
+The system prompt is stable across all requests in a session. Marking it with
+`cache_control: {"type": "ephemeral"}` tells the Anthropic API to cache that prefix, reducing
+latency and token cost for repeated calls. The 18-song catalog is currently too small to hit
+the 4096-token minimum for caching to activate, but the annotation is in place so caching
+kicks in automatically as the catalog grows — no code change needed.
+
+### Trade-offs
+
+| Decision | Benefit | Cost |
+|---|---|---|
+| Two-stage pipeline | Guardrailed, explainable | Two API calls per query |
+| JSON schema enforcement | No parsing fragility | Slightly more tokens |
+| Weighted scorer fallback | 100% uptime | Fallback quality lower than AI mode |
+| File + console logging | Full audit trail | Log files accumulate |
+| Keyword heuristic fallback profile | Works with no API | Coarser than Claude's parse |
+
+---
+
+## Testing Summary
+
+### What the tests cover
+
+| Test | What it validates |
+|---|---|
+| `test_parse_nl_validates_required_keys` | NL parser returns all five required profile keys |
+| `test_ai_rerank_only_returns_catalog_songs` | Hallucinated titles are filtered before output |
+| `test_ai_fallback_on_api_error` | `anthropic.APIError` triggers weighted-scorer fallback |
+| `test_ai_recommender_consistency` | Same mock response → same top recommendation |
+| `test_recommend_returns_songs_sorted_by_score` | Weighted scorer sorts correctly |
+| `test_explain_recommendation_returns_non_empty_string` | Explanation is always non-empty |
+
+All tests mock the Anthropic client — no real API calls, no API key required.
+
+### What worked
+
+- The guardrail test (`test_ai_rerank_only_returns_catalog_songs`) caught a real design question
+  early: what should happen when the AI returns a title that doesn't exist? The safety-net
+  append (missed songs appended at the end) was the right answer — the user always gets a
+  full top-5 even if Claude partially hallucinates.
+- The fallback test was easy to write because `anthropic.APIError` is a real importable class
+  in the SDK, not just a string exception.
+
+### What didn't work initially
+
+- The first draft of `AIRecommender.recommend()` had a leftover line that called the weighted
+  scorer with the raw string query (instead of the parsed profile dict), which caused an
+  `AttributeError` when `score_song()` tried to call `.get()` on a string. Caught immediately
+  by `test_ai_recommender_consistency`.
+- Prompt caching does not activate on the current 18-song catalog (below the 4096-token
+  minimum). This was discovered during implementation and documented in comments rather
+  than silently left as a misleading optimization.
+
+### What I learned
+
+Testing an LLM-integrated system is fundamentally about testing the *plumbing*, not the AI.
+You mock the AI and verify that your code correctly handles the output (valid case),
+malformed output (guardrail case), and failure (fallback case). The AI's actual quality is
+evaluated manually through sample interactions — tests can't capture that, but they can
+guarantee the system behaves safely regardless of what the AI returns.
 
 ---
 
 ## Reflection
 
-[**Full Model Card →**](model_card.md)
+### What this project taught me about AI
 
-Building VibeFinder made clear that recommender systems are not mysterious — they are
-weighted scorecards applied at scale. The surprising part was how *plausible* the outputs
-felt for well-formed profiles, not because the math is clever, but because the chosen
-features (energy, valence, mood) genuinely capture the same dimensions listeners use to
-describe their taste. A chill lofi listener and a high-energy pop listener use completely
-different words to ask for music, but both can be served by the same five-number formula
-once you measure the right things.
+Building VibeFinder in two versions — first without AI, then with — made one thing concrete:
+**the AI layer is not the intelligence; the system design is**. The weighted scorer was already
+producing surprisingly good recommendations. Claude's value was not replacing that logic but
+making it accessible (natural language in) and making it more nuanced (musical reasoning at
+the ranking step). Real production AI systems work this way: an LLM sits on top of
+deterministic retrieval and scoring, not instead of it.
 
-Bias showed up in two concrete ways. First, genre count imbalance: pop and lofi have
-3 catalog entries each while classical, metal, and blues have only 1 — so niche users have
-structurally fewer chances to earn the genre bonus, and the system is simply worse at
-serving them. Second, the flat genre bonus (+2.0) can override a much better emotional
-match in a different genre, which is how the "Conflicted Raver" profile ended up with a
-euphoric EDM track instead of the one melancholy song it was actually asking for. Both of
-these patterns exist in real production systems at larger scale — the lesson is that the
-data you train on and the weights you choose always reflect someone's priorities, even when
-the math looks neutral.
+### The alignment moment
 
+The "Conflicted Raver" edge case from the original project — a profile with EDM genre but
+melancholy mood — exposed the core tension in any recommender: when the user's own preferences
+contradict each other, whose priority wins? The formula answers "genre + energy" because that's
+what the weights say. Claude, given the same user description, correctly picks up the emotional
+subtext: someone asking for "high-energy but melancholy" probably wants something that *sounds*
+intense but *feels* introspective — a better answer than what the formula produces. That gap
+between "correct by the formula" and "right for the human" is where AI alignment lives, even in
+a music app.
 
----
+### What I'd build next
 
-## 7. `model_card_template.md`
-
-Combines reflection and model card framing from the Module 3 guidance. :contentReference[oaicite:2]{index=2}  
-
-```markdown
-# 🎧 Model Card - Music Recommender Simulation
-
-## 1. Model Name
-
-Give your recommender a name, for example:
-
-> VibeFinder 1.0
+1. **Genre similarity graph** — replace the binary genre bonus with a distance matrix so
+   "indie pop" and "pop" share partial credit, reducing the catalog-skew bias.
+2. **Implicit feedback loop** — track which recommendations the user skips vs. replays and
+   nudge target values between sessions, turning VibeFinder from a static form into a system
+   that actually learns.
+3. **Diversity enforcement** — cap results at one song per artist to prevent catalog depth
+   from letting one artist sweep all five slots.
 
 ---
 
-## 2. Intended Use
+## Project Structure
 
-- What is this system trying to do
-- Who is it for
-
-Example:
-
-> This model suggests 3 to 5 songs from a small catalog based on a user's preferred genre, mood, and energy level. It is for classroom exploration only, not for real users.
-
----
-
-## 3. How It Works (Short Explanation)
-
-Describe your scoring logic in plain language.
-
-- What features of each song does it consider
-- What information about the user does it use
-- How does it turn those into a number
-
-Try to avoid code in this section, treat it like an explanation to a non programmer.
-
----
-
-## 4. Data
-
-Describe your dataset.
-
-- How many songs are in `data/songs.csv`
-- Did you add or remove any songs
-- What kinds of genres or moods are represented
-- Whose taste does this data mostly reflect
+```
+applied-music-recommendations/
+├── data/
+│   └── songs.csv               # 18-song catalog (genre, mood, energy, valence, tempo, …)
+├── src/
+│   ├── recommender.py          # Core weighted scorer — load_songs, score_song, recommend_songs
+│   ├── ai_recommender.py       # Claude integration — NL parser, re-ranker, AIRecommender class
+│   ├── logger.py               # Centralized logging (file DEBUG + console WARNING)
+│   └── main.py                 # CLI entry point (--mode classic|ai  --query TEXT)
+├── tests/
+│   ├── conftest.py             # sys.path setup for pytest
+│   ├── test_recommender.py     # Core scorer tests
+│   └── test_ai_recommender.py  # AI layer tests (all calls mocked)
+├── logs/                       # Auto-created; YYYY-MM-DD.log written at runtime
+├── model_card.md               # VibeFinder model card (intended use, bias, evaluation)
+├── .env.example                # API key template — copy to .env
+├── .gitignore
+└── requirements.txt
+```
 
 ---
 
-## 5. Strengths
+## Tech Stack
 
-Where does your recommender work well
-
-You can think about:
-- Situations where the top results "felt right"
-- Particular user profiles it served well
-- Simplicity or transparency benefits
-
----
-
-## 6. Limitations and Bias
-
-Where does your recommender struggle
-
-Some prompts:
-- Does it ignore some genres or moods
-- Does it treat all users as if they have the same taste shape
-- Is it biased toward high energy or one genre by default
-- How could this be unfair if used in a real product
-
----
-
-## 7. Evaluation
-
-How did you check your system
-
-Examples:
-- You tried multiple user profiles and wrote down whether the results matched your expectations
-- You compared your simulation to what a real app like Spotify or YouTube tends to recommend
-- You wrote tests for your scoring logic
-
-You do not need a numeric metric, but if you used one, explain what it measures.
-
----
-
-## 8. Future Work
-
-If you had more time, how would you improve this recommender
-
-Examples:
-
-- Add support for multiple users and "group vibe" recommendations
-- Balance diversity of songs instead of always picking the closest match
-- Use more features, like tempo ranges or lyric themes
-
----
-
-## 9. Personal Reflection
-
-A few sentences about what you learned:
-
-- What surprised you about how your system behaved
-- How did building this change how you think about real music recommenders
-- Where do you think human judgment still matters, even if the model seems "smart"
-
+| Layer | Technology |
+|---|---|
+| Language | Python 3.9+ |
+| AI model | Claude Opus 4.7 (`claude-opus-4-7`) via Anthropic SDK |
+| Structured output | `output_config.format` with `json_schema` |
+| Prompt caching | `cache_control: ephemeral` on system prompt |
+| Environment config | `python-dotenv` |
+| Testing | `pytest` + `unittest.mock` |
+| Logging | Python `logging` (file + console handlers) |
+| Data | CSV catalog, 18 songs, 10 audio features |
